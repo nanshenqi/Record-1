@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {SERVICE_NAME}
+  labels:
+    app: {SERVICE_NAME}
+spec:
+  schedule: {CRON}
+  successfulJobsHistoryLimit: 1
+  jobTemplate:
+    metadata:
+      labels:
+        app: {SERVICE_NAME}
+    spec:
+      template:
+        metadata:
+          labels:
+            app: {SERVICE_NAME}
+        spec:
+          volumes:
+            - name: localtime
+              hostPath:
+                path: /etc/localtime
+          containers:
+            - name: app
+              image: {DOCKER_IMAGE}
+              imagePullPolicy: Always
+              resources:
+                requests:
+                  memory: "128Mi"
+                limits:
+                  memory: "1024Mi"
+              volumeMounts:
+                - name: localtime
+                  mountPath: /etc/localtime
+              env:
+                - name: CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {SERVICE_NAME}
+                      key: env-conf  # 根据约定，使用 env-conf 作为配置文件的 key，通过环境变量注入配置
+          imagePullSecrets:
+            - name: regcred
+          restartPolicy: OnFailure
+          terminationGracePeriodSeconds: 600
