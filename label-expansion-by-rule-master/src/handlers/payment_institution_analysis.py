@@ -3,7 +3,7 @@ from enums.chain import LbzChain
 from datetime import datetime, timedelta
 
 
-class PaymentInstitutionAnalysis(Handler):
+class PaymentInstitutionAnalysisHandler(Handler):
     """
     支付机构和金融托管分析处理器
     识别标准充币地址和非标准充币地址，并检测未知平台地址
@@ -153,6 +153,20 @@ class PaymentInstitutionAnalysis(Handler):
                     token_address = token_key.split(':')[1]
                     valuable_token_addresses.append(token_address)
             
+            if not addresses:
+                return stats
+
+            # 通过 data_key 获取映射后的真实表名，避免硬编码物理表
+            _, table = self.storage.doris.get_db_table("full_pair", chain)
+            address_list_sql = ','.join([f'"{addr}"' for addr in addresses])
+
+            # 构建代币过滤条件，避免出现 IN () 语法错误
+            if valuable_token_addresses:
+                token_list_sql = ','.join([f'"{token}"' for token in valuable_token_addresses])
+                token_filter_sql = f"(target_token IN ({token_list_sql}) OR target_token IS NULL)"
+            else:
+                token_filter_sql = "target_token IS NULL"
+
             # 构建Doris查询，统计有价值代币的入向交易金额和去除0交易的出向交易笔数
             query = f"""
             SELECT 
@@ -160,11 +174,11 @@ class PaymentInstitutionAnalysis(Handler):
                 -- 出向交易笔数（去除0交易）
                 SUM(CASE WHEN direction = 1 AND value > 0 THEN 1 ELSE 0 END) as out_tx_count,
                 -- 有价值代币的入向交易金额
-                SUM(CASE WHEN direction = 2 AND value > 0 AND (target_token IN ({','.join([f'"{token}"' for token in valuable_token_addresses])} OR target_token IS NULL)) THEN value ELSE 0 END) as valuable_in_amount
+                SUM(CASE WHEN direction = 2 AND value > 0 AND {token_filter_sql} THEN value ELSE 0 END) as valuable_in_amount
             FROM 
-                full_transaction_pairs_{chain}
+                {table}
             WHERE 
-                target_addr IN ({','.join([f'"{addr}"' for addr in addresses])})  -- 地址在指定列表中
+                target_addr IN ({address_list_sql})  -- 地址在指定列表中
             GROUP BY 
                 target_addr  -- 按地址分组
             """
@@ -198,6 +212,9 @@ class PaymentInstitutionAnalysis(Handler):
             # 计算昨天的日期（格式：YYYY-MM-DD）
             yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
+            # 通过 data_key 获取映射后的真实表名
+            _, table = self.storage.doris.get_db_table("daily_pair", chain)
+
             # 构建Doris查询，使用日交易对表
             if from_address:
                 query = f"""
@@ -208,7 +225,7 @@ class PaymentInstitutionAnalysis(Handler):
                     value as amount,              -- 交易额
                     latest_tx_time as block_time   -- 最近交易时间戳
                 FROM 
-                    {{table}}     -- 日交易对表，使用data_key映射
+                    {table}     -- 日交易对表，使用data_key映射
                 WHERE 
                     target_addr = '{from_address}'     -- 交易发送地址为指定地址
                     AND direction = 1                 -- 交易方向为1（转出）
@@ -218,15 +235,15 @@ class PaymentInstitutionAnalysis(Handler):
             elif to_addresses:
                 query = f"""
                 SELECT 
-                    target_addr as from_address,  -- 交易发送地址，重命名为from_address
-                    peer_addr as to_address,      -- 与target_addr成对的地址，重命名为to_address
+                    peer_addr as from_address,    -- 交易发送地址，重命名为from_address
+                    target_addr as to_address,    -- 交易接收地址，重命名为to_address
                     target_token as token_address, -- 代币地址
                     value as amount,              -- 交易额
                     latest_tx_time as block_time   -- 最近交易时间戳
                 FROM 
-                    {{table}}     -- 日交易对表，使用data_key映射
+                    {table}     -- 日交易对表，使用data_key映射
                 WHERE 
-                    peer_addr IN ({','.join([f'"{addr}"' for addr in to_addresses])})  -- 与target_addr成对的地址在指定列表中
+                    target_addr IN ({','.join([f'"{addr}"' for addr in to_addresses])})  -- 统计目标地址在指定列表中
                     AND direction = 2                 -- 交易方向为2（转入）
                     AND period = '{yesterday}'         -- 只查询昨天的数据
                 LIMIT {limit}
@@ -621,12 +638,15 @@ class PaymentInstitutionAnalysis(Handler):
             # 计算昨天的日期（格式：YYYY-MM-DD）
             yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
+            # 通过 data_key 获取映射后的真实表名
+            _, table = self.storage.doris.get_db_table("daily_pair", chain)
+
             # 构建Doris查询，使用日交易对表
             query = f"""
             SELECT 
                 COUNT(*) as tx_count  -- 交易笔数
             FROM 
-                {{table}}     -- 日交易对表，使用data_key映射
+                {table}     -- 日交易对表，使用data_key映射
             WHERE 
                 target_addr = '{address}'  -- 地址是发送方
                 AND period = '{yesterday}'         -- 只查询昨天的数据
@@ -658,14 +678,17 @@ class PaymentInstitutionAnalysis(Handler):
             # 计算昨天的日期（格式：YYYY-MM-DD）
             yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
+            # 通过 data_key 获取映射后的真实表名
+            _, table = self.storage.doris.get_db_table("daily_pair", chain)
+
             # 构建Doris查询，使用日交易对表
             query = f"""
             SELECT 
-                target_addr as from_address  -- 交易发送地址，重命名为from_address
+                peer_addr as from_address    -- 交易发送地址，重命名为from_address
             FROM 
-                {{table}}     -- 日交易对表，使用data_key映射
+                {table}     -- 日交易对表，使用data_key映射
             WHERE 
-                peer_addr = '{address}'     -- 与target_addr成对的地址为指定地址
+                target_addr = '{address}'   -- 统计目标地址为指定地址
                 AND direction = 2                 -- 交易方向为2（转入）
                 AND period = '{yesterday}'         -- 只查询昨天的数据
                 AND value > 0                      -- 只统计金额大于0的交易
