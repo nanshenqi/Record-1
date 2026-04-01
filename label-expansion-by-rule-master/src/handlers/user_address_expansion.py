@@ -43,9 +43,9 @@ class UserAddressExpansionHandler(Handler):
         cfg = self.config.get("SERVICE_CONFIG", {}).get("user_address_expansion", {})
         thresholds = self.config.get("THRESHOLD_CONFIG", {}).get("user_address_expansion", {})
 
-        platform_addresses = {addr.lower() for addr in cfg.get("platform_addresses", []) if addr}
+        platform_addresses = await self._get_platform_addresses(cfg)
         if not platform_addresses:
-            raise ValueError("SERVICE_CONFIG.user_address_expansion.platform_addresses 不能为空")
+            raise ValueError("平台地址为空：请配置 platform_addresses 或 platform_tag_a_id/platform_tag_v_id")
 
         # 有价值代币：来自可靠代币篮子（price > 0）。
         reliable_tokens = await self.storage.mongo.get_reliable_tokens(self.chain, price_gt_0=True)
@@ -86,6 +86,27 @@ class UserAddressExpansionHandler(Handler):
             phishing_addresses=sorted(phishing_addresses),
             unknown_platform_addresses=sorted(unknown_platform_addresses),
         )
+
+
+    async def _get_platform_addresses(self, cfg: dict) -> set[str]:
+        """获取平台地址。
+
+        优先级：
+        1) 直接使用 SERVICE_CONFIG.user_address_expansion.platform_addresses。
+        2) 若未配置地址，则通过标签接口按 a_id/v_id 拉取平台地址。
+        """
+        direct_addresses = {addr.lower() for addr in cfg.get("platform_addresses", []) if addr}
+        if direct_addresses:
+            return direct_addresses
+
+        a_id = cfg.get("platform_tag_a_id")
+        v_id = cfg.get("platform_tag_v_id")
+        if not (a_id or v_id):
+            return set()
+
+        tags = await self.storage.tag_api.get_tag_rels(self.chain, addr_list=None, a_id=a_id, v_id=v_id)
+        addresses = {(row.get("address") or "").lower() for row in tags}
+        return {addr for addr in addresses if addr}
 
     async def _collect_suspects(self, platform_addresses: set[str], reliable_tokens: set[str]) -> set[str]:
         """步骤 1：通过平台地址入向对手获取疑似用户地址。"""
